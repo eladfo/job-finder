@@ -6,40 +6,6 @@ import { computeScore, toggleAdjacency as toggleAdj } from '@/lib/score-utils'
 
 type View = 'search' | 'results' | 'score'
 
-// ponytail: mock data for UI development, replaced by real APIs in Phase 7
-const MOCK_JOBS: JobListing[] = [
-  {
-    title: 'Senior Software Engineer',
-    location: 'Tel Aviv, Israel',
-    url: 'https://example.com/jobs/1',
-    description: `About the role:\nWe're looking for a Senior Software Engineer to join our platform team.\n\nMust-haves:\n- 5+ years of experience with Python or Go\n- Experience with Kubernetes and container orchestration\n- Strong understanding of distributed systems\n- Experience with CI/CD pipelines\n\nNice-to-haves:\n- Experience with Terraform\n- Familiarity with GraphQL\n- Open source contributions`,
-  },
-  {
-    title: 'Software Engineer, Backend',
-    location: 'Remote',
-    url: 'https://example.com/jobs/2',
-    description: `We need a Backend Engineer to build scalable APIs.\n\nRequirements:\n- 3+ years backend development\n- Proficiency in Node.js or Python\n- SQL and NoSQL database experience\n- REST API design\n\nBonus:\n- TypeScript experience\n- AWS or GCP`,
-  },
-  {
-    title: 'Staff Engineer, Infrastructure',
-    location: 'New York, NY',
-    url: 'https://example.com/jobs/3',
-    description: `Staff-level infrastructure role.\n\nMust-haves:\n- 8+ years of software engineering experience\n- Deep expertise in cloud infrastructure (AWS/GCP/Azure)\n- Experience leading technical projects\n- Strong systems design skills\n\nNice-to-haves:\n- Experience with ML infrastructure\n- Public speaking or blog posts`,
-  },
-]
-
-const MOCK_SCORE: ScoreResult = {
-  mustHaves: [
-    { requirement: '5+ years Python or Go', status: 'full', score: 1.0, evidence: 'CV shows 7 years Python experience' },
-    { requirement: 'Kubernetes experience', status: 'adjacent', score: 0.5, evidence: 'Candidate has Docker and ECS experience, not Kubernetes directly' },
-    { requirement: 'Distributed systems', status: 'full', score: 1.0, evidence: 'Built microservices architecture handling 10K+ RPS' },
-    { requirement: 'CI/CD pipelines', status: 'none', score: 0, evidence: null },
-  ],
-  niceToHaves: ['Terraform', 'Open source contributions'],
-  totalScore: 63,
-  totalFraction: '2.5/4',
-}
-
 export default function Home() {
   const [view, setView] = useState<View>('search')
   const [jobs, setJobs] = useState<JobListing[]>([])
@@ -63,14 +29,20 @@ export default function Home() {
     setLoading(true)
     setError(null)
     try {
-      // ponytail: mock data for now, Phase 7 wires to /api/search
-      await new Promise(r => setTimeout(r, 1000))
-      setJobs(MOCK_JOBS)
-      setSelectedJob(MOCK_JOBS[0])
+      const res = await fetch('/api/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company, jobTitle, location }),
+      })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Search failed')
+      if (!data.jobs?.length) throw new Error('No matching jobs found')
+      setJobs(data.jobs)
+      setSelectedJob(data.jobs[0])
       setScoreResult(null)
       setView('results')
-    } catch {
-      setError('Failed to search. Please try again.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to search. Please try again.')
     } finally {
       setLoading(false)
     }
@@ -81,13 +53,19 @@ export default function Home() {
     setScoringJob(true)
     setError(null)
     try {
-      // ponytail: mock data for now, Phase 7 wires to /api/score
-      await new Promise(r => setTimeout(r, 1500))
-      setScoreResult(MOCK_SCORE)
-      setAdjustedMustHaves(MOCK_SCORE.mustHaves.map(m => ({ ...m })))
+      const fd = new FormData()
+      if (cvFile) fd.set('cv', cvFile)
+      else fd.set('cvText', cvText)
+      fd.set('jobDescription', selectedJob.description)
+
+      const res = await fetch('/api/score', { method: 'POST', body: fd })
+      const data = await res.json()
+      if (!res.ok) throw new Error(data.error || 'Scoring failed')
+      setScoreResult(data.score)
+      setAdjustedMustHaves(data.score.mustHaves.map((m: MustHave) => ({ ...m })))
       setView('score')
-    } catch {
-      setError('Failed to score. Please try again.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to score. Please try again.')
     } finally {
       setScoringJob(false)
     }
