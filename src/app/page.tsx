@@ -1,8 +1,61 @@
 'use client'
 
-import { useState, useRef, FormEvent } from 'react'
+import { useState, useRef, useEffect, FormEvent } from 'react'
 import type { JobListing, ScoreResult, MustHave } from '@/lib/types'
 import { computeScore, toggleAdjacency as toggleAdj } from '@/lib/score-utils'
+import { JOB_TITLES, LOCATIONS } from '@/lib/autocomplete-data'
+
+// ponytail: inline combobox — plain input + filtered ul, no dependency
+function Combobox({ value, onChange, options, placeholder, required, className }: {
+  value: string
+  onChange: (v: string) => void
+  options: string[]
+  placeholder?: string
+  required?: boolean
+  className?: string
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  const filtered = value.trim()
+    ? options.filter(o => o.toLowerCase().includes(value.toLowerCase())).slice(0, 8)
+    : []
+
+  useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handleClick)
+    return () => document.removeEventListener('mousedown', handleClick)
+  }, [])
+
+  return (
+    <div ref={ref} className="relative">
+      <input
+        type="text"
+        required={required}
+        className={className}
+        placeholder={placeholder}
+        value={value}
+        onChange={e => { onChange(e.target.value); setOpen(true) }}
+        onFocus={() => { if (filtered.length) setOpen(true) }}
+      />
+      {open && filtered.length > 0 && (
+        <ul className="absolute z-10 w-full mt-1 bg-white border border-zinc-200 rounded-lg shadow-lg max-h-48 overflow-y-auto">
+          {filtered.map(o => (
+            <li
+              key={o}
+              className="px-3 py-2 text-sm cursor-pointer hover:bg-zinc-100"
+              onMouseDown={() => { onChange(o); setOpen(false) }}
+            >
+              {o}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  )
+}
 
 type View = 'search' | 'results' | 'score'
 
@@ -156,24 +209,24 @@ export default function Home() {
             </div>
             <div>
               <label className="block text-sm font-medium mb-1">Job Title</label>
-              <input
-                type="text"
+              <Combobox
                 required
                 className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400"
                 placeholder="e.g. Software Engineer, Product Manager"
                 value={jobTitle}
-                onChange={e => setJobTitle(e.target.value)}
+                onChange={setJobTitle}
+                options={JOB_TITLES}
               />
             </div>
             <div>
               <label className="block text-sm font-medium mb-1">Location</label>
-              <input
-                type="text"
+              <Combobox
                 required
                 className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-zinc-400"
                 placeholder="e.g. Tel Aviv, Remote, New York"
                 value={location}
-                onChange={e => setLocation(e.target.value)}
+                onChange={setLocation}
+                options={LOCATIONS}
               />
             </div>
           </div>
