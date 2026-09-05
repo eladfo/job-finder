@@ -1,8 +1,9 @@
 import { chromium, type Page } from 'playwright'
 import type { JobListing } from './types'
+import { getCareerUrl, saveCareerUrl } from './db'
 
 // ponytail: heuristic scraper, no LLM, no Google Search (CAPTCHA).
-// Tries direct career URLs, then DuckDuckGo. Two extraction strategies:
+// Tries cached DB URL first, then common URL patterns. Two extraction strategies:
 // 1. Links with job-title text (most sites)
 // 2. H3/card-based extraction for JS-heavy sites (e.g. Google Careers)
 
@@ -16,20 +17,6 @@ const CAREER_URL_PATTERNS = [
   (c: string) => `https://boards.greenhouse.io/${c}`,
   (c: string) => `https://jobs.lever.co/${c}`,
 ]
-
-// ponytail: known companies with non-obvious career URLs, add when pattern fails
-const KNOWN_CAREER_URLS: Record<string, string> = {
-  google: 'https://www.google.com/about/careers/applications/jobs/results',
-  nvidia: 'https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite',
-  microsoft: 'https://careers.microsoft.com/global/en/search',
-  meta: 'https://www.metacareers.com/jobs',
-  apple: 'https://jobs.apple.com/en-us/search',
-  amazon: 'https://www.amazon.jobs/en/search',
-  netflix: 'https://jobs.netflix.com/search',
-  stripe: 'https://stripe.com/jobs/search',
-  openai: 'https://openai.com/careers/search',
-  spotify: 'https://www.lifeatspotify.com/jobs',
-}
 
 async function tryFillSearch(page: Page, jobTitle: string, location: string): Promise<boolean> {
   const searchSelectors = [
@@ -240,20 +227,23 @@ async function tryUrl(page: Page, url: string): Promise<boolean> {
 async function findCareersPage(page: Page, company: string, jobTitle: string, location: string): Promise<boolean> {
   const companyLower = company.toLowerCase().replace(/\s+/g, '')
 
-  // Check known URLs first, with query params if possible
-  const known = KNOWN_CAREER_URLS[companyLower]
-  if (known) {
-    const url = new URL(known)
+  // ponytail: check SQLite cache first — skips URL brute-force on repeat searches
+  const cached = await getCareerUrl(company)
+  if (cached) {
+    const url = new URL(cached)
     url.searchParams.set('q', jobTitle)
     if (location) url.searchParams.set('location', location)
     if (await tryUrl(page, url.toString())) return true
-    if (await tryUrl(page, known)) return true
+    if (await tryUrl(page, cached)) return true
   }
 
-  // Try common URL patterns
+  // Try common URL patterns, save first hit to DB
   for (const pattern of CAREER_URL_PATTERNS) {
     const url = pattern(companyLower)
-    if (await tryUrl(page, url)) return true
+    if (await tryUrl(page, url)) {
+      await saveCareerUrl(company, url)
+      return true
+    }
   }
 
   return false
