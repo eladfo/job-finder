@@ -1,70 +1,87 @@
 import { chromium, type Page } from 'playwright'
-import Anthropic from '@anthropic-ai/sdk'
 import type { JobListing } from './types'
 
-const MAX_ITERATIONS = 5
-const TIMEOUT_MS = 60_000
-const PAGE_TEXT_LIMIT = 4000
+// ponytail: heuristic scraper, no LLM. Finds search inputs, types the job title,
+// extracts job-like links. Works on most career pages. Upgrade to LLM-guided if needed.
 
-const anthropic = new Anthropic()
+async function tryFillSearch(page: Page, jobTitle: string): Promise<boolean> {
+  // ponytail: common search input selectors across career sites
+  const selectors = [
+    'input[name*="search" i]',
+    'input[placeholder*="search" i]',
+    'input[placeholder*="keyword" i]',
+    'input[placeholder*="job" i]',
+    'input[aria-label*="search" i]',
+    'input[type="search"]',
+    'input[id*="search" i]',
+    'input[name*="keyword" i]',
+    'input[name*="query" i]',
+    'input[name*="q" i]',
+  ]
 
-type AgentAction =
-  | { action: 'click'; selector: string }
-  | { action: 'type'; selector: string; text: string }
-  | { action: 'navigate'; url: string }
-  | { action: 'done'; jobs: { title: string; location: string; url: string; description: string }[] }
-
-async function extractPageContext(page: Page): Promise<string> {
-  const text = await page.evaluate(() => document.body.innerText)
-  const links = await page.evaluate(() =>
-    Array.from(document.querySelectorAll('a'))
-      .map(a => ({ text: a.innerText.trim(), href: a.href }))
-      .filter(l => l.text.length > 0 && l.href.startsWith('http'))
-      .slice(0, 50)
-  )
-  const truncatedText = text.slice(0, PAGE_TEXT_LIMIT)
-  const linkText = links.map(l => `[${l.text}](${l.href})`).join('\n')
-  return `URL: ${page.url()}\n\nPage text:\n${truncatedText}\n\nLinks:\n${linkText}`
+  for (const sel of selectors) {
+    try {
+      const input = await page.$(sel)
+      if (input && await input.isVisible()) {
+        await input.fill(jobTitle)
+        await page.keyboard.press('Enter')
+        await page.waitForLoadState('networkidle').catch(() => {})
+        await page.waitForTimeout(2000)
+        return true
+      }
+    } catch { continue }
+  }
+  return false
 }
 
-async function askClaudeForAction(
-  pageContext: string,
-  jobTitle: string,
-  location: string,
-): Promise<AgentAction> {
-  const response = await anthropic.messages.create({
-    model: 'claude-sonnet-4-20250514',
-    max_tokens: 1024,
-    messages: [
-      {
-        role: 'user',
-        content: `You are navigating a company's career/jobs website. The user is looking for jobs matching:
-- Title: "${jobTitle}"
-- Location: "${location}"
+async function extractJobLinks(page: Page, jobTitle: string, location: string): Promise<JobListing[]> {
+  const titleWords = jobTitle.toLowerCase().split(/\s+/)
 
-Current page:
-${pageContext}
+  const jobs = await page.evaluate(({ titleWords, location }: { titleWords: string[]; location: string }) => {
+    const links = Array.from(document.querySelectorAll('a')) as HTMLAnchorElement[]
+    const results: { title: string; location: string; url: string; description: string }[] = []
+    const seen = new Set<string>()
 
-Based on the current page, decide what to do next. Respond with ONLY a JSON object (no markdown, no backticks):
+    for (const link of links) {
+      const text = link.innerText.trim()
+      const href = link.href
+      if (!text || !href || href === '#' || seen.has(href)) continue
+      if (text.length < 5 || text.length > 200) continue
 
-Options:
-1. {"action": "click", "selector": "CSS selector to click"} — click a link or button to navigate deeper
-2. {"action": "type", "selector": "CSS selector of input", "text": "text to type"} — fill in a search/filter field
-3. {"action": "navigate", "url": "full URL"} — go to a specific URL you see in the links
-4. {"action": "done", "jobs": [{"title": "...", "location": "...", "url": "...", "description": "..."}]} — you can see job listings that match, extract them
+      // Check if link text looks like a job title matching the search
+      const lower = text.toLowerCase()
+      const matches = titleWords.some(w => lower.includes(w))
+      if (!matches) continue
 
-If you see a search form, fill it with the job title. If you see matching job listings, extract them with "done".
-If you see links to a jobs/careers page, navigate there. Extract as many matching jobs as you can find on the page.
-For job URLs, use the actual link to the job posting, not the current page URL.
-For descriptions, include as much of the job description as visible. If not visible, include what you can see (title, team, summary).`,
-      },
-    ],
-  })
+      // Skip nav/footer links
+      if (/sign in|log in|about us|privacy|terms|cookie/i.test(text)) continue
 
-  const text = response.content[0].type === 'text' ? response.content[0].text : ''
-  // ponytail: strip markdown fences if Claude adds them anyway
-  const cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim()
-  return JSON.parse(cleaned) as AgentAction
+      seen.add(href)
+
+      // Try to grab surrounding context as description
+      const parent = link.closest('li, tr, div[class*="job"], div[class*="card"], div[class*="posting"], article') as HTMLElement | null
+      const desc = parent ? parent.innerText.trim().slice(0, 500) : text
+
+      // Try to extract location from surrounding context
+      const locText = parent?.innerText || ''
+      const locLower = locText.toLowerCase()
+      const hasLocation = !location || location.toLowerCase() === 'remote'
+        ? true
+        : locLower.includes(location.toLowerCase()) || locLower.includes('remote')
+
+      if (hasLocation || !location) {
+        results.push({
+          title: text.split('\n')[0].trim(),
+          location: location || 'See posting',
+          url: href,
+          description: desc,
+        })
+      }
+    }
+    return results
+  }, { titleWords, location })
+
+  return jobs
 }
 
 export async function scrapeJobs(
@@ -79,78 +96,55 @@ export async function scrapeJobs(
   const page = await context.newPage()
   page.setDefaultTimeout(15_000)
 
-  const startTime = Date.now()
-
   try {
-    // Step 1: Google search for the company's careers page
-    const query = encodeURIComponent(`${company} careers jobs`)
+    // Step 1: Google search for the company's careers/jobs page with the title
+    const query = encodeURIComponent(`${company} careers ${jobTitle} jobs`)
     await page.goto(`https://www.google.com/search?q=${query}`, { waitUntil: 'domcontentloaded' })
-    await page.waitForLoadState('networkidle').catch(() => {}) // ponytail: best effort, don't fail on timeout
+    await page.waitForLoadState('networkidle').catch(() => {})
 
-    // Find and click the first organic result
+    // Click first organic result
     const firstResult = await page.$('div#search a[href^="http"]')
-    if (firstResult) {
-      const href = await firstResult.getAttribute('href')
-      if (href) {
-        await page.goto(href, { waitUntil: 'domcontentloaded' })
-        await page.waitForLoadState('networkidle').catch(() => {})
+    if (!firstResult) return []
+
+    const href = await firstResult.getAttribute('href')
+    if (!href) return []
+
+    await page.goto(href, { waitUntil: 'domcontentloaded' })
+    await page.waitForLoadState('networkidle').catch(() => {})
+
+    // Step 2: Try to find and fill a search box
+    await tryFillSearch(page, jobTitle)
+
+    // Step 3: Extract job links from the page
+    let jobs = await extractJobLinks(page, jobTitle, location)
+
+    // Step 4: If no jobs found, try clicking common "view jobs" / "see all" links
+    if (jobs.length === 0) {
+      const viewAllSelectors = [
+        'a:has-text("View all")',
+        'a:has-text("See all")',
+        'a:has-text("Browse")',
+        'a:has-text("Search")',
+        'a:has-text("Open positions")',
+        'a:has-text("Careers")',
+        'a:has-text("Jobs")',
+      ]
+      for (const sel of viewAllSelectors) {
+        try {
+          const link = await page.$(sel)
+          if (link && await link.isVisible()) {
+            await link.click()
+            await page.waitForLoadState('networkidle').catch(() => {})
+            await page.waitForTimeout(2000)
+            await tryFillSearch(page, jobTitle)
+            jobs = await extractJobLinks(page, jobTitle, location)
+            if (jobs.length > 0) break
+          }
+        } catch { continue }
       }
     }
 
-    // Step 2: LLM-guided navigation loop
-    for (let i = 0; i < MAX_ITERATIONS; i++) {
-      if (Date.now() - startTime > TIMEOUT_MS) break
-
-      const context = await extractPageContext(page)
-      const action = await askClaudeForAction(context, jobTitle, location)
-
-      if (action.action === 'done') {
-        return action.jobs.map(j => ({
-          title: j.title,
-          location: j.location,
-          url: j.url,
-          description: j.description,
-        }))
-      }
-
-      if (action.action === 'click') {
-        try {
-          await page.click(action.selector, { timeout: 5000 })
-          await page.waitForLoadState('networkidle').catch(() => {})
-        } catch {
-          // ponytail: if click fails, try navigating via evaluate
-          continue
-        }
-      }
-
-      if (action.action === 'type') {
-        try {
-          await page.fill(action.selector, action.text)
-          await page.keyboard.press('Enter')
-          await page.waitForLoadState('networkidle').catch(() => {})
-        } catch {
-          continue
-        }
-      }
-
-      if (action.action === 'navigate') {
-        try {
-          await page.goto(action.url, { waitUntil: 'domcontentloaded' })
-          await page.waitForLoadState('networkidle').catch(() => {})
-        } catch {
-          continue
-        }
-      }
-    }
-
-    // If we exhausted iterations, try one final extraction
-    const finalContext = await extractPageContext(page)
-    const finalAction = await askClaudeForAction(finalContext, jobTitle, location)
-    if (finalAction.action === 'done') {
-      return finalAction.jobs
-    }
-
-    return []
+    return jobs
   } finally {
     await browser.close()
   }

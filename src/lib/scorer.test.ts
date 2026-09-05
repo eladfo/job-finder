@@ -9,11 +9,8 @@ describe('parseCv', () => {
   })
 })
 
-// ponytail: integration test, needs ANTHROPIC_API_KEY
-const hasApiKey = !!process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'your-key-here'
-
-describe.skipIf(!hasApiKey)('scoreJob (integration)', () => {
-  it('returns structured score result', async () => {
+describe('scoreJob', () => {
+  it('scores a CV against a JD with must-haves and nice-to-haves', async () => {
     const cv = `Software Engineer with 7 years of Python experience.
 Built microservices on AWS ECS. Experience with CI/CD using GitHub Actions.
 Familiar with Terraform and Docker.`
@@ -29,19 +26,33 @@ Nice-to-haves:
 
     const result = await scoreJob(cv, jd)
 
-    expect(result).toHaveProperty('mustHaves')
-    expect(result).toHaveProperty('niceToHaves')
-    expect(result).toHaveProperty('totalScore')
-    expect(result).toHaveProperty('totalFraction')
-    expect(Array.isArray(result.mustHaves)).toBe(true)
-    expect(result.mustHaves.length).toBeGreaterThan(0)
-    expect(typeof result.totalScore).toBe('number')
+    expect(result.mustHaves).toHaveLength(3)
     expect(result.totalScore).toBeGreaterThanOrEqual(0)
     expect(result.totalScore).toBeLessThanOrEqual(100)
+    expect(typeof result.totalFraction).toBe('string')
 
-    for (const mh of result.mustHaves) {
-      expect(['full', 'adjacent', 'none']).toContain(mh.status)
-      expect([0, 0.5, 1]).toContain(mh.score)
-    }
-  }, 30_000)
+    // Python should be a full match
+    const python = result.mustHaves.find(m => m.requirement.toLowerCase().includes('python'))
+    expect(python?.status).toBe('full')
+
+    // Kubernetes should be adjacent (CV has Docker/ECS)
+    const k8s = result.mustHaves.find(m => m.requirement.toLowerCase().includes('kubernetes'))
+    expect(k8s?.status).toBe('adjacent')
+
+    // CI/CD should match
+    const cicd = result.mustHaves.find(m => m.requirement.toLowerCase().includes('ci/cd'))
+    expect(cicd?.status === 'full' || cicd?.status === 'adjacent').toBe(true)
+
+    // Terraform should be in nice-to-haves
+    expect(result.niceToHaves.some(n => n.toLowerCase().includes('terraform'))).toBe(true)
+  })
+
+  it('handles JD with no clear sections', async () => {
+    const cv = 'Senior developer with 10 years Java and Spring Boot experience'
+    const jd = 'Looking for a Java developer with 5+ years of experience in Spring Boot'
+
+    const result = await scoreJob(cv, jd)
+    expect(result).toHaveProperty('mustHaves')
+    expect(result).toHaveProperty('totalScore')
+  })
 })
