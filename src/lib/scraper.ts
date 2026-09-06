@@ -42,21 +42,24 @@ async function tryFillSearch(page: Page, jobTitle: string, location: string): Pr
     } catch { continue }
   }
 
-  // Also try location inputs
-  const locSelectors = [
-    'input[name*="location" i]', 'input[placeholder*="location" i]',
-    'input[aria-label*="location" i]',
-  ]
-  for (const sel of locSelectors) {
-    try {
-      const input = await page.$(sel)
-      if (input && await input.isVisible()) {
-        await input.fill(location)
-        await page.keyboard.press('Enter')
-        await page.waitForLoadState('networkidle').catch(() => {})
-        await page.waitForTimeout(1000)
-      }
-    } catch { continue }
+  // Also try location inputs — but skip "remote" as many sites don't recognize it
+  // as a location and it causes zero-result filters
+  if (location && location.toLowerCase() !== 'remote') {
+    const locSelectors = [
+      'input[name*="location" i]', 'input[placeholder*="location" i]',
+      'input[aria-label*="location" i]',
+    ]
+    for (const sel of locSelectors) {
+      try {
+        const input = await page.$(sel)
+        if (input && await input.isVisible()) {
+          await input.fill(location)
+          await page.keyboard.press('Enter')
+          await page.waitForLoadState('networkidle').catch(() => {})
+          await page.waitForTimeout(1000)
+        }
+      } catch { continue }
+    }
   }
 
   return filled
@@ -213,6 +216,59 @@ async function extractFromHeadings(page: Page, jobTitle: string, location: strin
   }, { titleWords, location })
 }
 
+// Strategy 3: card-based extraction for ATS platforms (e.g. Netflix/iCIMS)
+// ponytail: some career sites render jobs as div cards with no <a> or <h2>,
+// using classes like .position-card, .position-title. Fallback for when 1+2 miss.
+async function extractFromCards(page: Page, jobTitle: string, location: string): Promise<JobListing[]> {
+  const titleWords = jobTitle.toLowerCase().split(/\s+/)
+
+  return page.evaluate(({ titleWords, location }: { titleWords: string[]; location: string }) => {
+    const results: { title: string; location: string; url: string; description: string }[] = []
+    const seen = new Set<string>()
+
+    // Common card selectors across ATS platforms
+    const cardSelectors = [
+      '[class*="position-card"]', '[class*="job-card"]', '[class*="job-listing"]',
+      '[class*="jobCard"]', '[class*="JobCard"]', '[class*="posting-card"]',
+    ]
+
+    let cards: HTMLElement[] = []
+    for (const sel of cardSelectors) {
+      const found = Array.from(document.querySelectorAll(sel)) as HTMLElement[]
+      if (found.length > 0) { cards = found; break }
+    }
+
+    const titleSelectors = [
+      '[class*="position-title"]', '[class*="job-title"]', '[class*="jobTitle"]',
+      '[class*="posting-title"]', 'h3', 'h4',
+    ]
+
+    for (const card of cards) {
+      let title = ''
+      for (const sel of titleSelectors) {
+        const el = card.querySelector(sel) as HTMLElement | null
+        if (el) { title = el.innerText.trim(); break }
+      }
+      if (!title) continue
+
+      const lower = title.toLowerCase()
+      if (!titleWords.some(w => lower.includes(w))) continue
+      if (seen.has(title)) continue
+      seen.add(title)
+
+      const link = card.querySelector('a') as HTMLAnchorElement | null
+      const url = link?.href || window.location.href
+      const locEl = card.querySelector('[class*="location"]') as HTMLElement | null
+      const jobLoc = locEl?.innerText.trim() || location || 'See posting'
+      const desc = card.innerText.trim().slice(0, 500)
+
+      results.push({ title, location: jobLoc, url, description: desc })
+    }
+
+    return results
+  }, { titleWords, location })
+}
+
 async function tryUrl(page: Page, url: string): Promise<boolean> {
   try {
     const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 10_000 })
@@ -227,13 +283,11 @@ async function tryUrl(page: Page, url: string): Promise<boolean> {
 async function findCareersPage(page: Page, company: string, jobTitle: string, location: string): Promise<boolean> {
   const companyLower = company.toLowerCase().replace(/\s+/g, '')
 
-  // ponytail: check SQLite cache first — skips URL brute-force on repeat searches
+  // ponytail: check SQLite cache first — skips URL brute-force on repeat searches.
+  // Navigate to plain URL and let tryFillSearch handle the search — appending ?q=
+  // often triggers bad sorting or doesn't filter properly on some ATS platforms.
   const cached = await getCareerUrl(company)
   if (cached) {
-    const url = new URL(cached)
-    url.searchParams.set('q', jobTitle)
-    if (location) url.searchParams.set('location', location)
-    if (await tryUrl(page, url.toString())) return true
     if (await tryUrl(page, cached)) return true
   }
 
@@ -277,12 +331,20 @@ export async function scrapeJobs(
       jobs = await extractFromHeadings(page, jobTitle, location)
     }
 
+    // Strategy 3: card-based extraction (ATS platforms like iCIMS/Netflix)
+    if (jobs.length === 0) {
+      jobs = await extractFromCards(page, jobTitle, location)
+    }
+
     // If still nothing, try URL params approach
     if (jobs.length === 0) {
       await tryUrlParams(page, jobTitle, location)
       jobs = await extractFromLinks(page, jobTitle, location)
       if (jobs.length === 0) {
         jobs = await extractFromHeadings(page, jobTitle, location)
+      }
+      if (jobs.length === 0) {
+        jobs = await extractFromCards(page, jobTitle, location)
       }
     }
 

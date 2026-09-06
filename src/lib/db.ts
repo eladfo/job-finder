@@ -13,11 +13,11 @@ let db: Database | null = null
 const KNOWN_CAREER_URLS: Record<string, string> = {
   google: 'https://www.google.com/about/careers/applications/jobs/results',
   nvidia: 'https://nvidia.wd5.myworkdayjobs.com/NVIDIAExternalCareerSite',
-  microsoft: 'https://careers.microsoft.com/global/en/search',
+  microsoft: 'https://apply.careers.microsoft.com/careers',
   meta: 'https://www.metacareers.com/jobs',
   apple: 'https://jobs.apple.com/en-us/search',
   amazon: 'https://www.amazon.jobs/en/search',
-  netflix: 'https://jobs.netflix.com/search',
+  netflix: 'https://explore.jobs.netflix.net/careers',
   stripe: 'https://stripe.com/jobs/search',
   openai: 'https://openai.com/careers/search',
   spotify: 'https://www.lifeatspotify.com/jobs',
